@@ -1,0 +1,14 @@
+{
+  "name": "pcan-web-app",
+  "version": "1.0.0",
+  "description": "A web interface for PCAN-Basic.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "chartjs-plugin-zoom": "^2.2.0",
+    "express": "^4.17.1"
+  }
+}

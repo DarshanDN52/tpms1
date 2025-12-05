@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Chart from 'chart.js/auto';
 import ChartZoom from 'chartjs-plugin-zoom';
+import { pcanApi } from '../services/api';
 
 Chart.register(ChartZoom);
 
@@ -13,9 +14,14 @@ function TPMSDashboard() {
   const mainChartInstanceRef = useRef(null);
   const detailChartRef = useRef(null);
   const detailChartInstanceRef = useRef(null);
-  const simulationRef = useRef(null);
 
-  const [config, setConfig] = useState(null);
+  const [config, setConfig] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('tpmsConfig');
+      if (saved) return JSON.parse(saved);
+    } catch { }
+    return { totalTires: 6, axleConfig: [2, 4], configStr: '2,4' };
+  });
   const [tireData, setTireData] = useState({});
   const [view, setView] = useState('top-view');
   const [selectedMetric, setSelectedMetric] = useState('pressure');
@@ -63,105 +69,136 @@ function TPMSDashboard() {
   }, []);
 
   useEffect(() => {
-    const savedConfig = sessionStorage.getItem('tpmsConfig');
-    if (savedConfig) {
-      const parsed = JSON.parse(savedConfig);
-      setConfig(parsed);
+    const parsed = config;
+    const initialTires = {};
+    let initialHistory = { pressure: {}, temperature: {}, battery: {} };
 
-      const initialTires = {};
-      const initialHistory = { pressure: {}, temperature: {}, battery: {} };
-
-      for (let i = 1; i <= parsed.totalTires; i++) {
-        initialTires[i] = {
-          id: i,
-          position: getTirePositionName(i, parsed.axleConfig),
-          pressure: 35 + Math.random() * 10,
-          temperature: 20 + Math.random() * 15,
-          battery: 3 + Math.random() * 2,
-          status: 'normal',
-          lastUpdate: new Date(),
-        };
-        initialHistory.pressure[i] = [];
-        initialHistory.temperature[i] = [];
-        initialHistory.battery[i] = [];
-      }
-
-      setTireData(initialTires);
-      setDataHistory(initialHistory);
-
-      const now = new Date();
-      for (let point = 0; point < 20; point++) {
-        const timeLabel = new Date(now.getTime() - (20 - point) * 2000).toLocaleTimeString();
-        for (let i = 1; i <= parsed.totalTires; i++) {
-          const basePressure = 35 + (i % 3) * 5;
-          const baseTemp = 20 + (i % 2) * 5;
-          const baseBattery = 3.5 + (i % 4) * 0.5;
-          initialHistory.pressure[i].push({ x: timeLabel, y: basePressure + (Math.random() - 0.5) * 8 });
-          initialHistory.temperature[i].push({ x: timeLabel, y: baseTemp + (Math.random() - 0.5) * 10 });
-          initialHistory.battery[i].push({ x: timeLabel, y: Math.max(2, Math.min(5, baseBattery + (Math.random() - 0.5) * 1)) });
+    const savedHistoryStr = sessionStorage.getItem('tpmsHistory');
+    if (savedHistoryStr) {
+      try {
+        const savedHistory = JSON.parse(savedHistoryStr);
+        if (savedHistory && savedHistory.pressure && savedHistory.temperature && savedHistory.battery) {
+          initialHistory = savedHistory;
         }
-      }
-      setDataHistory({ ...initialHistory });
-      setIsCollecting(true);
+      } catch (err) { void err; }
     }
 
-    return () => {
-      if (simulationRef.current) {
-        clearInterval(simulationRef.current);
-      }
-    };
-  }, [getTirePositionName]);
+    // Restore tire data if available
+    const savedTireDataStr = sessionStorage.getItem('tpmsTireData');
+    let savedTireData = null;
+    if (savedTireDataStr) {
+      try {
+        savedTireData = JSON.parse(savedTireDataStr);
+      } catch (err) { void err; }
+    }
+
+    // Reconstruct tires, merging with saved data if it matches the current config
+    for (let i = 1; i <= parsed.totalTires; i++) {
+      const existingInfo = savedTireData && savedTireData[i] ? savedTireData[i] : {};
+      // Note: We reconstruct 'id' and 'position' to ensure they match current config,
+      // but preserve sensor values (pressure etc) if they were saved.
+      // We do *not* check if 'existingInfo' belongs to the same config layout strictly,
+      // but 'totalTires' check above guards slightly. ideally we should version check too.
+
+      initialTires[i] = {
+        id: i,
+        position: getTirePositionName(i, parsed.axleConfig),
+        pressure: existingInfo.pressure || 0,
+        temperature: existingInfo.temperature || 0,
+        battery: existingInfo.battery || 0,
+        status: existingInfo.status || 'missing',
+        lastUpdate: existingInfo.lastUpdate ? new Date(existingInfo.lastUpdate) : new Date(),
+      };
+      initialHistory.pressure[i] = initialHistory.pressure[i] || [];
+      initialHistory.temperature[i] = initialHistory.temperature[i] || [];
+      initialHistory.battery[i] = initialHistory.battery[i] || [];
+    }
+    setTireData(initialTires);
+    setDataHistory(initialHistory);
+    setIsCollecting(true);
+  }, [getTirePositionName, config]);
 
   useEffect(() => {
     if (!isCollecting || !config) return;
 
-    const simulate = () => {
-      setTireData(prev => {
-        const updated = { ...prev };
+    let intervalId;
+
+    const fetchData = async () => {
+      try {
+        const res = await pcanApi.read();
+        // console.log('TPMS Read:', res); // Debug log
+        const msg = res?.payload?.data?.message;
+        if (!msg || typeof msg === 'string') return;
+        const watchId = (config?.watchId || '').trim().toUpperCase();
+        if (watchId && msg.id !== watchId) return;
+
         const now = new Date();
         const timeLabel = now.toLocaleTimeString();
+        const bytes = Array.isArray(msg.data) ? msg.data : [];
+        if (bytes.length < 7) return;
 
-        for (let i = 1; i <= config.totalTires; i++) {
-          const basePressure = 35 + (i % 3) * 5;
-          const baseTemp = 20 + (i % 2) * 5;
-          const baseBattery = 3.5 + (i % 4) * 0.5;
+        const sensorId = bytes[0] & 0xFF;
+        const tireIndex = sensorId + 1;
+        if (tireIndex < 1 || !config?.totalTires || tireIndex > config.totalTires) return;
 
-          const newPressure = basePressure + (Math.random() - 0.5) * 8;
-          const newTemp = baseTemp + (Math.random() - 0.5) * 10;
-          const newBattery = Math.max(2, Math.min(5, baseBattery + (Math.random() - 0.5) * 1));
+        const packetType = bytes[1] & 0xFF;
+        const pressure = ((bytes[2] << 8) | bytes[3]) & 0xFFFF;
+        const tempRaw = ((bytes[5] << 8) | bytes[4]) & 0xFFFF;
+        const temperature = (tempRaw - 8500) / 100;
+        const battery = ((bytes[6] * 10) + 2000) / 1000;
 
-          updated[i] = {
-            ...updated[i],
-            pressure: newPressure,
-            temperature: newTemp,
-            battery: newBattery,
-            lastUpdate: now,
-            status: calculateStatus({ pressure: newPressure, temperature: newTemp, battery: newBattery }),
-          };
-        }
+        const severity = (pt => {
+          if (pt === 0x01) return 'ok';
+          if (pt === 0x02) return 'info';
+          if (pt === 0x03) return 'missing';
+          if (pt === 0x04 || pt === 0x05) return 'warning';
+          if (pt >= 0x06 && pt <= 0x09) return 'reserved';
+          if (pt === 0x10) return 'low';
+          if (pt === 0x11) return 'critical';
+          return 'ok';
+        })(packetType);
+
+        setTireData(prevTireData => {
+          const updatedTireData = { ...prevTireData };
+          if (updatedTireData[tireIndex]) {
+            updatedTireData[tireIndex] = {
+              ...updatedTireData[tireIndex],
+              pressure,
+              temperature,
+              battery,
+              lastUpdate: now,
+              status: severity,
+            };
+          }
+          try { sessionStorage.setItem('tpmsTireData', JSON.stringify(updatedTireData)); } catch (err) { void err; }
+          return updatedTireData;
+        });
 
         setDataHistory(prevHistory => {
           const newHistory = { ...prevHistory };
-          for (let i = 1; i <= config.totalTires; i++) {
-            ['pressure', 'temperature', 'battery'].forEach(metric => {
-              if (!newHistory[metric][i]) newHistory[metric][i] = [];
-              newHistory[metric][i] = [...newHistory[metric][i], { x: timeLabel, y: updated[i][metric] }];
-              if (newHistory[metric][i].length > MAX_HISTORY_POINTS) {
-                newHistory[metric][i] = newHistory[metric][i].slice(-MAX_HISTORY_POINTS);
-              }
-            });
-          }
+          ['pressure', 'temperature', 'battery'].forEach(metric => {
+            const value = metric === 'pressure' ? pressure : metric === 'temperature' ? temperature : battery;
+            if (!newHistory[metric][tireIndex]) newHistory[metric][tireIndex] = [];
+            newHistory[metric][tireIndex] = [...newHistory[metric][tireIndex], { x: timeLabel, y: value }];
+            if (newHistory[metric][tireIndex].length > MAX_HISTORY_POINTS) {
+              newHistory[metric][tireIndex] = newHistory[metric][tireIndex].slice(-MAX_HISTORY_POINTS);
+            }
+          });
+          try { sessionStorage.setItem('tpmsHistory', JSON.stringify(newHistory)); } catch (err) { void err; }
           return newHistory;
         });
-
-        return updated;
-      });
+      } catch (e) { void e; }
     };
 
-    simulationRef.current = setInterval(simulate, 2000);
+    const startFetching = async () => {
+      intervalId = setInterval(fetchData, 100);
+    };
+
+    startFetching();
+
     return () => {
-      if (simulationRef.current) {
-        clearInterval(simulationRef.current);
+      if (intervalId) {
+        clearInterval(intervalId);
       }
     };
   }, [isCollecting, config, calculateStatus]);
@@ -215,6 +252,7 @@ function TPMSDashboard() {
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        spanGaps: true, // Connect dots even if data is missing
         plugins: {
           title: { display: true, text: `TPMS ${titles[selectedMetric]} Over Time`, font: { size: 18, weight: 'bold' }, color: '#f2f5ff' },
           legend: { display: true, position: 'top', labels: { color: '#f2f5ff', font: { size: 12 }, padding: 15, usePointStyle: true } },
@@ -309,8 +347,8 @@ function TPMSDashboard() {
   const calculateTirePositions = useCallback(() => {
     if (!config) return [];
     const positions = [];
-    const truckLength = 52;
-    const truckFrontX = 19;
+    const truckLength = 50;
+    const truckFrontX = 26;
     const numAxles = config.axleConfig.length;
     const axleSpacing = numAxles > 1 ? truckLength / (numAxles - 1) : 0;
 
@@ -322,8 +360,8 @@ function TPMSDashboard() {
 
       for (let j = 0; j < tiresPerSide; j++) {
         const currentX = axleX;
-        positions.push({ x: currentX, y: 16.5 - j * sideHeight });
-        positions.push({ x: currentX, y: 68.5 + j * sideHeight });
+        positions.push({ x: currentX, y: 23.5 - j * sideHeight });
+        positions.push({ x: currentX, y: 76.5 + j * sideHeight });
       }
     }
     return positions;
@@ -351,18 +389,7 @@ function TPMSDashboard() {
     setDetailView(views[newIndex]);
   }, [detailView]);
 
-  if (!config) {
-    return (
-      <div className="tpms-page">
-        <div className="tpms-container">
-          <h1>TPMS Dashboard</h1>
-          <p>No tire configuration found. Please configure from the CAN Console.</p>
-          <button className="btn-primary" onClick={() => navigate('/')}>Go to CAN Console</button>
-        </div>
-        <style>{globalStyles}</style>
-      </div>
-    );
-  }
+
 
   const positions = calculateTirePositions();
 
@@ -548,6 +575,9 @@ const globalStyles = `
     --danger: #ff5c6a;
     --success: #29d98c;
     --warning: #ff9800;
+    --info: #5cc8ff;
+    --reserved: #9b59b6;
+    --low: #ffeb3b;
     --text: #f2f5ff;
     --muted: #9ba3c7;
   }
@@ -746,8 +776,10 @@ const globalStyles = `
 
   .tire:hover { transform: translate(-50%, -50%) scale(1.1); box-shadow: 0 6px 15px rgba(0, 0, 0, 0.4); z-index: 20; }
 
-  .tire.normal { border-color: var(--success); }
-
+  .tire.ok { border-color: var(--success); }
+  .tire.info { border-color: var(--info); }
+  .tire.missing { border-color: var(--muted); }
+  
   .tire.warning {
     border-color: var(--warning);
     background-image: repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 3px, transparent 3px, transparent 8px),
@@ -763,6 +795,9 @@ const globalStyles = `
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3), 0 0 20px rgba(244, 67, 54, 0.6), inset 0 2px 4px rgba(255, 255, 255, 0.3);
     animation: pulse-critical 1s infinite;
   }
+
+  .tire.reserved { border-color: var(--reserved); }
+  .tire.low { border-color: var(--low); }
 
   @keyframes pulse-warning { 0%, 100% { transform: translate(-50%, -50%) scale(1); } 50% { transform: translate(-50%, -50%) scale(1.05); } }
   @keyframes pulse-critical { 0%, 100% { transform: translate(-50%, -50%) scale(1); } 50% { transform: translate(-50%, -50%) scale(1.1); } }
@@ -815,8 +850,12 @@ const globalStyles = `
 
   .data-box:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3); }
 
-  .data-box.normal { border-left-color: var(--success); }
+  .data-box.ok { border-left-color: var(--success); }
+  .data-box.info { border-left-color: var(--info); }
+  .data-box.missing { border-left-color: var(--muted); }
   .data-box.warning { border-left-color: var(--warning); }
+  .data-box.reserved { border-left-color: var(--reserved); }
+  .data-box.low { border-left-color: var(--low); }
   .data-box.critical { border-left-color: var(--danger); }
 
   .data-box h3 { margin-bottom: 15px; font-size: 1.2em; color: var(--text); }

@@ -19,7 +19,7 @@ function CANConsole() {
   const [tireCount, setTireCount] = useState(6);
   const [tireConfig, setTireConfig] = useState('2,4');
   const [tpmsError, setTpmsError] = useState('');
-  
+
   const pollTimerRef = useRef(null);
   const MAX_BUFFER_SIZE = 1000;
 
@@ -38,7 +38,7 @@ function CANConsole() {
       clearInterval(pollTimerRef.current);
     }
     fetchMessage();
-    pollTimerRef.current = setInterval(fetchMessage, 1000);
+    pollTimerRef.current = setInterval(fetchMessage, 50);
   }, []);
 
   const stopPolling = useCallback(() => {
@@ -63,7 +63,7 @@ function CANConsole() {
   const handleNewMessage = (message) => {
     const key = `${message.msg_type}-${message.id}`;
     const currentTimestamp = Date.now();
-    
+
     setMessageCounters(prev => ({
       ...prev,
       [key]: (prev[key] || 0) + 1
@@ -71,7 +71,7 @@ function CANConsole() {
 
     const prevTimestamp = lastTimestamps[message.id];
     const cycleTime = prevTimestamp ? (currentTimestamp - prevTimestamp).toFixed(0) : '-';
-    
+
     setLastTimestamps(prev => ({
       ...prev,
       [message.id]: currentTimestamp
@@ -79,13 +79,13 @@ function CANConsole() {
 
     let dataDisplay = '';
     let parsedInfo = null;
-    
+
     if (message.parsed) {
       const p = message.parsed;
       dataDisplay = `Sensor ${p.sensor_id} | Pressure: ${p.pressure} | Temp: ${p.temperature}C | Battery: ${p.battery_watts} W`;
       parsedInfo = p;
     } else {
-      dataDisplay = Array.isArray(message.data) 
+      dataDisplay = Array.isArray(message.data)
         ? message.data.map(byte => byte.toString(16).padStart(2, '0').toUpperCase()).join(' ')
         : '';
     }
@@ -215,23 +215,23 @@ function CANConsole() {
 
   const handleTPMSSubmit = (e) => {
     e.preventDefault();
-    const total = parseInt(tireCount);
-    const configArr = tireConfig.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
-    
-    if (isNaN(total) || total < 1) {
-      setTpmsError('Please enter a valid total tire count');
-      return;
-    }
+    const totalParsed = parseInt(tireCount);
+    const configArrParsed = tireConfig.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
 
-    if (configArr.length === 0) {
-      setTpmsError('Please enter valid axle configuration (e.g., 2,4)');
-      return;
-    }
+    let total = totalParsed;
+    let configArr = configArrParsed;
 
+    let valid = true;
+    if (isNaN(total) || total < 1) valid = false;
     const configTotal = configArr.reduce((sum, n) => sum + n, 0);
-    if (configTotal !== total) {
-      setTpmsError(`Total tires (${configTotal}) must match the total count (${total})`);
-      return;
+    if (configArr.length === 0 || configTotal !== total) valid = false;
+
+    if (!valid) {
+      setTpmsError('Using default: total=6, axles=2,4');
+      total = 6;
+      configArr = [2, 4];
+    } else {
+      setTpmsError('');
     }
 
     sessionStorage.setItem('tpmsConfig', JSON.stringify({
@@ -239,12 +239,26 @@ function CANConsole() {
       axleConfig: configArr,
       configStr: tireConfig
     }));
-    
+
     navigate('/tpms');
   };
 
   useEffect(() => {
+    // Check initial connection status
+    pcanApi.getStatus().then(res => {
+      if (res.status_code === '00000h') {
+        setConnected(true);
+        startPolling();
+      }
+    }).catch(() => { });
+
+    const handleBeforeUnload = () => {
+      try { pcanApi.release(); } catch { }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      // Removed pcanApi.release() to keep connection alive during navigation
       stopPolling();
     };
   }, [stopPolling]);
@@ -307,18 +321,18 @@ function CANConsole() {
             <div className="field-grid-row">
               <div className="field">
                 <span>Identifier (hex)</span>
-                <input 
-                  type="text" 
-                  value={writeId} 
+                <input
+                  type="text"
+                  value={writeId}
                   onChange={(e) => setWriteId(e.target.value.replace(/[^0-9a-fA-F]/g, '').toUpperCase())}
                   maxLength={8}
                 />
               </div>
               <div className="field">
                 <span>DLC</span>
-                <input 
-                  type="number" 
-                  value={writeDlc} 
+                <input
+                  type="number"
+                  value={writeDlc}
                   onChange={(e) => handleDlcChange(e.target.value)}
                   min={0}
                   max={64}
@@ -410,23 +424,24 @@ function CANConsole() {
             <form onSubmit={handleTPMSSubmit}>
               <div className="field">
                 <span>Total Number of Tires</span>
-                <input 
-                  type="number" 
-                  value={tireCount} 
+                <input
+                  type="number"
+                  value={tireCount}
                   onChange={(e) => setTireCount(e.target.value)}
                   min={1}
-                  max={20}
+                  max={32}
                 />
               </div>
               <div className="field">
                 <span>Tires per Axle (comma-separated)</span>
-                <input 
-                  type="text" 
-                  value={tireConfig} 
+                <input
+                  type="text"
+                  value={tireConfig}
                   onChange={(e) => setTireConfig(e.target.value)}
                   placeholder="e.g., 2,4"
                 />
               </div>
+
               <p className="hint">Example: Enter "2,4" for a truck with 2 front tires and 4 rear tires (total 6)</p>
               {tpmsError && <p className="error-message">{tpmsError}</p>}
               <div className="button-row">

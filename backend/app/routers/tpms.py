@@ -6,7 +6,7 @@ router = APIRouter()
 
 @router.post("/start")
 async def start_tpms(request: TPMSStartRequest):
-    return tpms_service.start_collection(request.tire_count)
+    return tpms_service.start_collection(request.tire_count, request.axle_config or [])
 
 @router.post("/stop")
 async def stop_tpms():

@@ -1,6 +1,9 @@
 from typing import Optional, Dict, Any
 import sys
 import os
+import threading
+import time
+from collections import deque
 
 # Add root directory to path to import PCANBasic
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -45,6 +48,9 @@ class PCANService:
         self.message_counter = 0
         self.pcan_available = False
         self.pcan = None
+        self.read_buffer = deque(maxlen=2000)
+        self.reader_thread: Optional[threading.Thread] = None
+        self.reader_running = False
         
         # Try to instantiate PCANBasic if available
         if PCANBasic is not None:
@@ -111,13 +117,45 @@ class PCANService:
                 self.channel = channel
                 self.baudrate = baudrate
                 self.message_counter = 0
+                try:
+                    self.pcan.SetValue(pcan_channel, PCAN_MESSAGE_FILTER, PCAN_FILTER_OPEN)
+                except Exception:
+                    pass
+                try:
+                    self.pcan.SetValue(pcan_channel, PCAN_ALLOW_STATUS_FRAMES, PCAN_PARAMETER_ON)
+                except Exception:
+                    pass
+                try:
+                    self.pcan.SetValue(pcan_channel, PCAN_ALLOW_RTR_FRAMES, PCAN_PARAMETER_ON)
+                except Exception:
+                    pass
+                try:
+                    self.pcan.SetValue(pcan_channel, PCAN_ALLOW_ERROR_FRAMES, PCAN_PARAMETER_ON)
+                except Exception:
+                    pass
+                try:
+                    self.pcan.SetValue(pcan_channel, PCAN_BITRATE_ADAPTING, PCAN_PARAMETER_ON)
+                except Exception:
+                    pass
+                try:
+                    self.pcan.SetValue(pcan_channel, PCAN_BUSOFF_AUTORESET, PCAN_PARAMETER_ON)
+                except Exception:
+                    pass
+                try:
+                    self.pcan.SetValue(pcan_channel, PCAN_RECEIVE_STATUS, PCAN_PARAMETER_ON)
+                except Exception:
+                    pass
                 return {
                     "success": True,
                     "message": f"Channel {channel} initialized successfully at {baudrate}"
                 }
             else:
                 # Get error message
-                error_text = self.pcan.GetErrorText(result)
+                try:
+                    et = self.pcan.GetErrorText(result)
+                    error_text = et[1].decode(errors='ignore') if isinstance(et, tuple) and isinstance(et[1], (bytes, bytearray)) else str(et)
+                except Exception:
+                    error_text = str(result)
                 return {
                     "success": False,
                     "error": f"Failed to initialize PCAN: {error_text}"
@@ -128,15 +166,31 @@ class PCANService:
                 "success": False,
                 "error": f"PCAN initialization error: {str(e)}"
             }
+        finally:
+            if self.initialized and not self.reader_running and self.pcan_available:
+                self.reader_running = True
+                try:
+                    self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                    self.reader_thread.start()
+                except Exception:
+                    self.reader_running = False
     
     def release(self) -> Dict[str, Any]:
         try:
             if self.initialized:
+                if self.reader_running:
+                    self.reader_running = False
+                    try:
+                        if self.reader_thread is not None:
+                            self.reader_thread.join(timeout=1.0)
+                    except Exception:
+                        pass
                 result = self.pcan.Uninitialize(self.channel_map[self.channel])
                 self.initialized = False
                 self.channel = None
                 self.baudrate = None
                 self.message_counter = 0
+                self.read_buffer.clear()
                 
                 if result == PCAN_ERROR_OK:
                     return {
@@ -144,7 +198,11 @@ class PCANService:
                         "message": "Channel released successfully"
                     }
                 else:
-                    error_text = self.pcan.GetErrorText(result)
+                    try:
+                        et = self.pcan.GetErrorText(result)
+                        error_text = et[1].decode(errors='ignore') if isinstance(et, tuple) and isinstance(et[1], (bytes, bytearray)) else str(et)
+                    except Exception:
+                        error_text = str(result)
                     return {
                         "success": False,
                         "error": f"Failed to release PCAN: {error_text}"
@@ -175,7 +233,11 @@ class PCANService:
                     "status_text": "OK"
                 }
             else:
-                error_text = self.pcan.GetErrorText(result)
+                try:
+                    et = self.pcan.GetErrorText(result)
+                    error_text = et[1].decode(errors='ignore') if isinstance(et, tuple) and isinstance(et[1], (bytes, bytearray)) else str(et)
+                except Exception:
+                    error_text = str(result)
                 return {
                     "status_code": "00001h",
                     "status_text": error_text
@@ -200,20 +262,49 @@ class PCANService:
             }
         
         try:
-            # Call Read() and unpack the tuple (status, message, timestamp)
-            result = self.pcan.Read(self.channel_map[self.channel])
-            status_code = result[0]
-            
-            if status_code == PCAN_ERROR_OK:
+            if self.read_buffer:
+                item = self.read_buffer.popleft()
                 self.message_counter += 1
-                can_msg = result[1]
-                timestamp = result[2]
-                
-                # Parse message data - get only the bytes indicated by LEN
+                item["counter"] = self.message_counter
+                return {
+                    "success": True,
+                    "message": item
+                }
+            ch = self.channel_map.get(self.channel)
+            if ch is None:
+                return {"success": True, "message": None}
+            try:
+                resfd = self.pcan.ReadFD(ch)
+                if resfd[0] == PCAN_ERROR_OK:
+                    msgfd = resfd[1]
+                    tsfd = resfd[2]
+                    datafd = []
+                    for i in range(msgfd.DLC):
+                        datafd.append(msgfd.DATA[i])
+                    self.message_counter += 1
+                    return {
+                        "success": True,
+                        "message": {
+                            "counter": self.message_counter,
+                            "id": f"{msgfd.ID:03X}",
+                            "msg_type": "DATA",
+                            "len": msgfd.DLC,
+                            "data": datafd,
+                            "timestamp": self._timestamp_to_us(tsfd)
+                        }
+                    }
+                elif resfd[0] != PCAN_ERROR_QRCVEMPTY:
+                    pass
+            except Exception:
+                pass
+            res = self.pcan.Read(ch)
+            if res[0] == PCAN_ERROR_OK:
+                can_msg = res[1]
+                timestamp = res[2]
                 data = []
                 for i in range(can_msg.LEN):
                     data.append(can_msg.DATA[i])
-                
+                self.message_counter += 1
                 return {
                     "success": True,
                     "message": {
@@ -222,23 +313,10 @@ class PCANService:
                         "msg_type": "DATA",
                         "len": can_msg.LEN,
                         "data": data,
-                        "timestamp": timestamp.value if hasattr(timestamp, 'value') else timestamp
+                        "timestamp": self._timestamp_to_us(timestamp)
                     }
                 }
-            elif status_code == PCAN_ERROR_QRCVEMPTY:
-                # Queue is empty - not an error condition
-                return {
-                    "success": True,
-                    "message": None  # No message available
-                }
-            else:
-                # Get error message from PCAN
-                error_text = self.pcan.GetErrorText(status_code)
-                return {
-                    "success": False,
-                    "message": f"Read error: {error_text}"
-                }
-        
+            return {"success": True, "message": None}
         except Exception as e:
             return {
                 "success": False,
@@ -255,16 +333,26 @@ class PCANService:
         try:
             # Parse message ID
             can_id = int(msg_id, 16)
+            is_extended = extended or (can_id > 0x7FF) or (len(msg_id) > 3)
             
             # Create CAN message
             can_msg = TPCANMsg()
             can_msg.ID = can_id
-            can_msg.MSGTYPE = PCAN_MESSAGE_STANDARD
-            can_msg.LEN = len(data)
+            msg_type = 0
+            try:
+                # Combine flags for extended/RTR if available
+                if is_extended:
+                    msg_type |= PCAN_MESSAGE_EXTENDED.value if hasattr(PCAN_MESSAGE_EXTENDED, 'value') else PCAN_MESSAGE_EXTENDED
+                if rtr:
+                    msg_type |= PCAN_MESSAGE_RTR.value if hasattr(PCAN_MESSAGE_RTR, 'value') else PCAN_MESSAGE_RTR
+            except Exception:
+                msg_type = 0
+            can_msg.MSGTYPE = msg_type
+            can_msg.LEN = min(len(data), 8)
             
             # Copy data to message
-            for i, byte in enumerate(data):
-                if i < 8:
+            if not rtr:
+                for i, byte in enumerate(data[:can_msg.LEN]):
                     can_msg.DATA[i] = byte
             
             # Send message
@@ -276,7 +364,11 @@ class PCANService:
                     "message": f"Message sent successfully - ID: {msg_id}"
                 }
             else:
-                error_text = self.pcan.GetErrorText(result)
+                try:
+                    et = self.pcan.GetErrorText(result)
+                    error_text = et[1].decode(errors='ignore') if isinstance(et, tuple) and isinstance(et[1], (bytes, bytearray)) else str(et)
+                except Exception:
+                    error_text = str(result)
                 return {
                     "success": False,
                     "error": f"Failed to send message: {error_text}"
@@ -287,5 +379,67 @@ class PCANService:
                 "success": False,
                 "error": f"Error writing message: {str(e)}"
             }
+
+    def _reader_loop(self):
+        try:
+            while self.reader_running and self.initialized and self.pcan_available:
+                try:
+                    ch = self.channel_map.get(self.channel)
+                    if ch is None:
+                        time.sleep(0.05)
+                        continue
+                    # Drain the queue in bursts, similar to the example's timer tick
+                    while True:
+                        res = self.pcan.Read(ch)
+                        status_code = res[0]
+                        if status_code == PCAN_ERROR_OK:
+                            can_msg = res[1]
+                            timestamp = res[2]
+                            # Extract data
+                            data = []
+                            for i in range(can_msg.LEN):
+                                data.append(can_msg.DATA[i])
+                            # Determine type label
+                            try:
+                                is_rtr = (can_msg.MSGTYPE & PCAN_MESSAGE_RTR.value) == PCAN_MESSAGE_RTR.value
+                            except Exception:
+                                is_rtr = False
+                            msg_type_str = "RTR" if is_rtr else "DATA"
+                            item = {
+                                "id": f"{can_msg.ID:03X}",
+                                "msg_type": msg_type_str,
+                                "len": can_msg.LEN,
+                                "data": data,
+                                "timestamp": self._timestamp_to_us(timestamp)
+                            }
+                            self.read_buffer.append(item)
+                            continue
+                        elif status_code == PCAN_ERROR_QRCVEMPTY:
+                            break
+                        else:
+                            # Non-empty error; we can sleep and retry
+                            break
+                except Exception:
+                    # Suppress read-loop exceptions to keep the thread alive
+                    pass
+                time.sleep(0.05)
+        finally:
+            pass
+
+    def _timestamp_to_us(self, ts: Any) -> int:
+        try:
+            # FD timestamp uses .value already in microseconds
+            if hasattr(ts, 'value'):
+                return int(getattr(ts, 'value'))
+            # Classic timestamp fields: micros + 1000*millis + overflow
+            micros = getattr(ts, 'micros', 0)
+            millis = getattr(ts, 'millis', 0)
+            overflow = getattr(ts, 'millis_overflow', 0)
+            return int(micros + (1000 * millis) + (0x100000000 * 1000 * overflow))
+        except Exception:
+            try:
+                return int(ts)
+            except Exception:
+                return 0
 
 pcan_service = PCANService()

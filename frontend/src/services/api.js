@@ -93,11 +93,11 @@ export const pcanApi = {
 };
 
 export const tpmsApi = {
-  async start(tireCount) {
+  async start(tireCount, axleConfig) {
     const response = await fetch(`${API_BASE}/tpms/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tire_count: tireCount })
+      body: JSON.stringify({ tire_count: tireCount, axle_config: axleConfig })
     });
     return response.json();
   },

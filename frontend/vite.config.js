@@ -11,7 +11,20 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/devices': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/start-test': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/ws': {
+        target: 'ws://localhost:8000',
+        ws: true,
         changeOrigin: true,
       }
     }

@@ -30,6 +30,22 @@ function TPMSDashboard() {
   const [dataHistory, setDataHistory] = useState({ pressure: {}, temperature: {}, battery: {} });
   const [isCollecting, setIsCollecting] = useState(false);
 
+  // New state for graph filtering
+  const [visibleTires, setVisibleTires] = useState([]);
+  const [isTireDropdownOpen, setIsTireDropdownOpen] = useState(false);
+  const dropdownRef = useRef(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setIsTireDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const getTirePositionName = useCallback((tireNum, axleConfig) => {
     let currentTire = 0;
     for (let axleIndex = 0; axleIndex < axleConfig.length; axleIndex++) {
@@ -115,6 +131,14 @@ function TPMSDashboard() {
     }
     setTireData(initialTires);
     setDataHistory(initialHistory);
+
+    // Initialize visible tires to all tires
+    const allTireIds = [];
+    for (let i = 1; i <= parsed.totalTires; i++) {
+      allTireIds.push(i);
+    }
+    setVisibleTires(allTireIds);
+
     setIsCollecting(true);
   }, [getTirePositionName, config]);
 
@@ -223,6 +247,9 @@ function TPMSDashboard() {
     const sortedLabels = Array.from(allLabels).sort();
 
     for (let i = 1; i <= config.totalTires; i++) {
+      // Filter based on visibility
+      if (!visibleTires.includes(i)) continue;
+
       const history = dataHistory[selectedMetric][i] || [];
       const dataMap = new Map(history.map(h => [h.x, h.y]));
       const data = sortedLabels.map(label => dataMap.get(label) || null);
@@ -255,7 +282,7 @@ function TPMSDashboard() {
         spanGaps: true, // Connect dots even if data is missing
         plugins: {
           title: { display: true, text: `TPMS ${titles[selectedMetric]} Over Time`, font: { size: 18, weight: 'bold' }, color: '#f2f5ff' },
-          legend: { display: true, position: 'top', labels: { color: '#f2f5ff', font: { size: 12 }, padding: 15, usePointStyle: true } },
+          legend: { display: false }, // Hide default legend as requested
           tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(0, 0, 0, 0.8)', padding: 12, titleColor: '#f2f5ff', bodyColor: '#f2f5ff' },
           zoom: {
             wheel: { enabled: true, speed: 0.1 },
@@ -276,7 +303,28 @@ function TPMSDashboard() {
         mainChartInstanceRef.current.destroy();
       }
     };
-  }, [dataHistory, selectedMetric, config, generateColors, getTirePositionName]);
+  }, [dataHistory, selectedMetric, config, generateColors, getTirePositionName, visibleTires]);
+
+  const toggleTireVisibility = (tireId) => {
+    setVisibleTires(prev => {
+      if (prev.includes(tireId)) {
+        return prev.filter(id => id !== tireId);
+      } else {
+        return [...prev, tireId].sort((a, b) => a - b);
+      }
+    });
+  };
+
+  const toggleAllTires = () => {
+    if (!config) return;
+    if (visibleTires.length === config.totalTires) {
+      setVisibleTires([]);
+    } else {
+      const all = [];
+      for (let i = 1; i <= config.totalTires; i++) all.push(i);
+      setVisibleTires(all);
+    }
+  };
 
   useEffect(() => {
     if (selectedTire === null || !detailChartRef.current || !dataHistory.pressure[selectedTire]) return;
@@ -344,27 +392,99 @@ function TPMSDashboard() {
     };
   }, [selectedTire, dataHistory, detailView]);
 
-  const calculateTirePositions = useCallback(() => {
-    if (!config) return [];
-    const positions = [];
-    const truckLength = 50;
-    const truckFrontX = 26;
+  const calculateLayout = useCallback(() => {
+    if (!config) return { positions: [], truckStyle: {}, cabStyle: {}, trailerStyle: {} };
+
     const numAxles = config.axleConfig.length;
-    const axleSpacing = numAxles > 1 ? truckLength / (numAxles - 1) : 0;
+    const axleSpacing = 18; // Fixed spacing for consistency
+    const cabWidth = 20; // Width of cab in %
+    const frontOverhang = 4;
+    const rearOverhang = 8;
+
+    // Calculate total detailed width required
+    const axleSpan = (numAxles - 1) * axleSpacing;
+    const totalContentWidth = frontOverhang + cabWidth + axleSpan + rearOverhang;
+
+    // Clamp width to reasonably fill screen but not overflow (max 95%)
+    // If it's too wide, we scale down the spacing logic implicitly by reducing width
+    const maxWidth = 95;
+    const finalWidth = Math.min(maxWidth, Math.max(50, totalContentWidth));
+
+    // Centering
+    const leftPos = (100 - finalWidth) / 2;
+
+    // Scaling factor if we had to shrink
+    const scale = finalWidth / totalContentWidth;
+
+    const positions = [];
+    const effectiveAxleSpacing = axleSpacing * scale;
+    const effectiveCabWidth = cabWidth * scale;
+    const effectiveRearOverhang = rearOverhang * scale;
+
+    // Truck Body Styles
+    const truckStyle = {
+      width: `${finalWidth}%`,
+      left: '50%',
+      transform: 'translateX(-50%)'
+    };
+
+    // Cab and Trailer split
+    // Cab is effectiveCabWidth percent of the VIEWPORT.
+    // But inside truckStyle (which is finalWidth wide), cab is (effectiveCabWidth / finalWidth) * 100 %
+    const cabPercent = (effectiveCabWidth / finalWidth) * 100;
+
+    const cabStyle = { width: `${cabPercent}%` };
+    const trailerStyle = { width: `${100 - cabPercent}%` };
+
+    // Tire dimensions for calculation (must match render loop)
+    const tireHeightPx = 40; // Fixed height matching render loop
+    const containerHeight = 400;
+    const tireHeightPercent = (tireHeightPx / containerHeight) * 100;
+
+
+    const verticalGap = 37; // Fixed gap between top and bottom tire sets
+    const centerLine = 55.5; // Fixed vertical center line
 
     for (let i = 0; i < numAxles; i++) {
-      const axleX = truckFrontX + i * axleSpacing;
+      let axleX;
+
+      if (i === 0) {
+        // Front axle: Positioned near the cab center
+        axleX = leftPos + (effectiveCabWidth * 0.5);
+      } else {
+        // Rear axles: Positioned from the right end of the trailer
+        // The last axle is at the right end minus overhang
+        const rightEnd = leftPos + finalWidth - effectiveRearOverhang;
+        // Calculate offset from the last axle
+        const stepsFromEnd = (numAxles - 1) - i;
+        axleX = rightEnd - (stepsFromEnd * effectiveAxleSpacing);
+      }
+
       const numTiresOnAxle = config.axleConfig[i];
       const tiresPerSide = numTiresOnAxle / 2;
-      const sideHeight = 16;
+      const tireSpacing = 10.5; // Reduced from 11 for tighter dual tire spacing
 
       for (let j = 0; j < tiresPerSide; j++) {
-        const currentX = axleX;
-        positions.push({ x: currentX, y: 23.5 - j * sideHeight });
-        positions.push({ x: currentX, y: 76.5 + j * sideHeight });
+        // j=0 is outer, j=1 is inner (closer to chassis)
+        // We position relative to the gap.
+
+        // Distance from the inner-most position
+        const dist = (tiresPerSide - 1 - j) * tireSpacing;
+
+        // Top Side: Inner edge at (center - gap/2)
+        // Top position = (center - gap/2 - tireHeight) - dist
+        const yTop = (centerLine - (verticalGap / 2) - tireHeightPercent) - dist;
+
+        // Bottom Side: Inner edge at (center + gap/2)
+        // Top position = (center + gap/2) + dist
+        const yBottom = (centerLine + (verticalGap / 2)) + dist;
+
+        positions.push({ x: axleX, y: yTop });
+        positions.push({ x: axleX, y: yBottom });
       }
     }
-    return positions;
+
+    return { positions, truckStyle, cabStyle, trailerStyle };
   }, [config]);
 
   const handleZoom = useCallback((chartRef, direction) => {
@@ -391,7 +511,7 @@ function TPMSDashboard() {
 
 
 
-  const positions = calculateTirePositions();
+  const { positions, truckStyle, cabStyle, trailerStyle } = calculateLayout();
 
   return (
     <div className="tpms-page">
@@ -415,22 +535,34 @@ function TPMSDashboard() {
           {view === 'top-view' ? (
             <div className="truck-container-wrapper">
               <div className="truck-2d-view">
-                <div className="truck-body-container">
+                <div className="truck-body-container" style={truckStyle}>
                   <div className="truck-body">
-                    <div className="truck-cab"></div>
-                    <div className="truck-trailer"></div>
+                    <div className="truck-cab" style={cabStyle}></div>
+                    <div className="truck-trailer" style={trailerStyle}></div>
                   </div>
                 </div>
                 {positions.map((pos, idx) => {
                   const tireNum = idx + 1;
                   const tire = tireData[tireNum];
                   const status = tire?.status || 'normal';
+                  const numAxles = config.axleConfig.length;
+                  // Use consistent tire dimensions regardless of axle count
+                  const tireWidth = '80px';
+                  const tireHeight = '40px';
+                  const fontSize = '0.9rem';
+
                   return (
                     <div
                       key={tireNum}
                       className={`tire ${status}`}
                       onClick={() => setSelectedTire(tireNum)}
-                      style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+                      style={{
+                        left: `${pos.x}%`,
+                        top: `${pos.y}%`,
+                        width: tireWidth,
+                        height: tireHeight,
+                        fontSize: fontSize
+                      }}
                     >
                       <div className="tire-label">T{tireNum}</div>
                     </div>
@@ -464,6 +596,47 @@ function TPMSDashboard() {
                 <option value="temperature">Temperature (°C)</option>
                 <option value="battery">Battery Level (W)</option>
               </select>
+            </div>
+
+            {/* Custom Tire Selector Dropdown */}
+            <div className="custom-multiselect" ref={dropdownRef}>
+              <button
+                className="multiselect-trigger"
+                onClick={() => setIsTireDropdownOpen(!isTireDropdownOpen)}
+              >
+                Select Tires {visibleTires.length === config?.totalTires ? '(All)' : `(${visibleTires.length})`}
+                <span className="arrow">▼</span>
+              </button>
+
+              {isTireDropdownOpen && (
+                <div className="multiselect-dropdown">
+                  <div className="multiselect-header">
+                    <label className="checkbox-item check-all">
+                      <input
+                        type="checkbox"
+                        checked={config && visibleTires.length === config.totalTires}
+                        onChange={toggleAllTires}
+                      />
+                      <span>All Tires</span>
+                    </label>
+                  </div>
+                  <div className="multiselect-list">
+                    {config && Array.from({ length: config.totalTires }, (_, i) => i + 1).map(i => (
+                      <label key={i} className="checkbox-item">
+                        <input
+                          type="checkbox"
+                          checked={visibleTires.includes(i)}
+                          onChange={() => toggleTireVisibility(i)}
+                        />
+                        <span>Tire {i}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="multiselect-footer">
+                    <button className="done-btn" onClick={() => setIsTireDropdownOpen(false)}>Done</button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           <div className="zoom-controls">
@@ -710,8 +883,8 @@ const globalStyles = `
 
   .truck-body-container {
     position: absolute;
-    top: 50%;
-    left: 50%;
+    top: 33%;
+    left: %;
     transform: translate(-50%, -50%);
     width: 70%;
     height: 35%;
@@ -810,11 +983,15 @@ const globalStyles = `
     text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
     z-index: 2;
     position: relative;
-    background: rgba(0, 0, 0, 0.4);
-    padding: 7px 8px;
+    // background: rgba(0, 0, 0, 0.4);
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 50%;
     letter-spacing: 0.5px;
-    margin-bottom: 5px;
+    margin-bottom: 0px;
   }
 
   .tire-value {
@@ -1121,6 +1298,107 @@ const globalStyles = `
     .tire-detail-modal-content { padding: 20px !important; }
     .graph-controls-header { flex-direction: column; align-items: flex-start; }
   }
+    .tire-detail-modal-content { padding: 20px !important; }
+    .graph-controls-header { flex-direction: column; align-items: flex-start; }
+  }
+
+  /* Custom Multi-select Styles */
+  .custom-multiselect {
+    position: relative;
+    display: inline-block;
+  }
+
+  .multiselect-trigger {
+    padding: 12px 20px;
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    font-size: 16px;
+    background: #080b16;
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.3s ease;
+    min-width: 200px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .multiselect-trigger:hover { border-color: var(--accent); }
+  
+  .multiselect-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0; /* Align right to avoid overflow if on edge */
+    margin-top: 8px;
+    background: #0d101b;
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    width: 250px;
+    z-index: 100;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    overflow: hidden;
+    animation: fadeIn 0.2s ease;
+  }
+
+  .multiselect-header {
+    padding: 12px 15px;
+    border-bottom: 1px solid var(--card-border);
+    background: rgba(0,0,0,0.2);
+  }
+
+  .multiselect-list {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 10px 0;
+  }
+  
+  /* Scrollbar for dropdown */
+  .multiselect-list::-webkit-scrollbar { width: 6px; }
+  .multiselect-list::-webkit-scrollbar-track { background: transparent; }
+  .multiselect-list::-webkit-scrollbar-thumb { background: var(--card-border); border-radius: 3px; }
+  .multiselect-list::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  .checkbox-item {
+    display: flex;
+    align-items: center;
+    padding: 8px 15px;
+    cursor: pointer;
+    transition: background 0.2s;
+    user-select: none;
+  }
+
+  .checkbox-item:hover { background: rgba(92, 200, 255, 0.1); }
+
+  .checkbox-item input[type="checkbox"] {
+    margin-right: 12px;
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  
+  .checkbox-item span { color: var(--text); font-size: 14px; }
+
+  .multiselect-footer {
+    padding: 10px;
+    border-top: 1px solid var(--card-border);
+    display: flex;
+    justify-content: flex-end;
+    background: rgba(0,0,0,0.2);
+  }
+
+  .done-btn {
+    background: var(--accent);
+    color: #02111c;
+    border: none;
+    padding: 6px 16px;
+    border-radius: 6px;
+    font-weight: bold;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  
+  .done-btn:hover { background: var(--accent-strong); }
 `;
 
 export default TPMSDashboard;

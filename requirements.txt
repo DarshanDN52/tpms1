@@ -2,3 +2,6 @@ fastapi
 uvicorn
 pydantic
 flask-cors
+bleak
+pandas
+openpyxl

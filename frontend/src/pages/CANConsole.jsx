@@ -271,7 +271,7 @@ function CANConsole() {
           <button className="primary" onClick={() => setShowTPMSModal(true)}>
             TPMS Data
           </button>
-          <button className="primary" onClick={() => window.open('http://192.167.29.229:8000/ui', '_blank')}>
+          <button className="primary" onClick={() => navigate('/ble-test')}>
             TESTING
           </button>
         </div>

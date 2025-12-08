@@ -643,7 +643,7 @@ function TPMSDashboard() {
             <button className="zoom-btn" onClick={() => handleZoom(mainChartInstanceRef, 'in')} title="Zoom In">+</button>
             <button className="zoom-btn" onClick={() => handleZoom(mainChartInstanceRef, 'out')} title="Zoom Out">-</button>
             <button className="zoom-btn" onClick={() => handleZoomReset(mainChartInstanceRef)} title="Reset Zoom">Reset</button>
-            <span className="zoom-hint">Drag to pan, Scroll to zoom</span>
+
           </div>
           <div className="graph-container">
             <canvas ref={mainChartRef}></canvas>

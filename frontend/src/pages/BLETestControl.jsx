@@ -160,15 +160,12 @@ const BLETestControl = () => {
     return (
         <div className="app-shell">
             <header className="page-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                    <button className="ghost" onClick={handleBack} style={{ padding: '8px 16px' }}>
-                        ⬅ Back To Main
-                    </button>
-                    <h1>BLE Test Automation</h1>
-                </div>
-                <div>
-                    {/* Removed filler to align with CANConsole style */}
-                </div>
+                <h1>BLE Test Automation</h1>
+                <button className="ghost" onClick={handleBack} style={{
+                    padding: '8px 16px',
+                }}>
+                    ⬅ Back To Main
+                </button>
             </header>
 
             <main className="grid">
